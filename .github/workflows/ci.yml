@@ -129,6 +129,15 @@ jobs:
           REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
           IMAGE_TAG: sha-${{ github.sha }}
         run: |
+          if aws ecr describe-images \
+            --repository-name $REPOSITORY \
+            --image-ids imageTag=$IMAGE_TAG \
+            >/dev/null 2>&1; then
+            # Immutable ECR repositories cannot accept the same sha tag twice.
+            echo "Image tag already exists in ECR. Reusing $IMAGE_TAG."
+            exit 0
+          fi
+
           docker tag ai-worker:local $REGISTRY/$REPOSITORY:$IMAGE_TAG
           docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
 
@@ -247,7 +256,7 @@ jobs:
           fi
 
       - name: Rollback on failure
-        if: failure() && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.deploy_ai_worker == 'true'))
+        if: failure() && steps.current-task.outputs.arn != '' && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.deploy_ai_worker == 'true'))
         env:
           CLUSTER: ${{ secrets.ECS_CLUSTER }}
           SERVICE: ${{ secrets.ECS_SERVICE }}
