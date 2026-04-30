@@ -164,12 +164,12 @@ jobs:
           IMAGE_TAG: sha-${{ github.sha }}
           CLUSTER: ${{ secrets.ECS_CLUSTER }}
           SERVICE: ${{ secrets.ECS_SERVICE }}
-          TASK_FAMILY: ${{ secrets.ECS_TASK_FAMILY }}
+          CURRENT_TASK_ARN: ${{ steps.current-task.outputs.arn }}
           TEST_MODE: ${{ inputs.test_mode || 'normal' }}
         run: |
-          # 현재 Task Definition에서 이미지만 새 태그로 교체해 새 revision 등록
+          # 현재 서비스가 실제로 실행 중인 Task Definition을 기준으로 새 revision 등록
           TASK_DEF=$(aws ecs describe-task-definition \
-            --task-definition $TASK_FAMILY \
+            --task-definition $CURRENT_TASK_ARN \
             --query taskDefinition)
 
           NEW_TASK_DEF=$(echo $TASK_DEF | jq \
