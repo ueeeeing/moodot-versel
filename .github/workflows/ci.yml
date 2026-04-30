@@ -180,15 +180,16 @@ jobs:
                    .registeredAt, .registeredBy)')
 
           if [ "$TEST_MODE" = "healthcheck-fail" ]; then
-            # Rollback test only: keep the image intact and make ECS container health fail.
+            # Rollback test only: keep the image intact and force ECS health to fail.
             NEW_TASK_DEF=$(echo "$NEW_TASK_DEF" | jq \
-              '.containerDefinitions[0].healthCheck = {
-                command: ["CMD-SHELL", "exit 1"],
-                interval: 30,
-                timeout: 5,
-                retries: 3,
-                startPeriod: 60
-              }')
+              '.containerDefinitions[0].healthCheck = (
+                (.containerDefinitions[0].healthCheck // {
+                  interval: 30,
+                  timeout: 5,
+                  retries: 3,
+                  startPeriod: 15
+                }) | .command = ["CMD-SHELL", "exit 1"]
+              )')
           fi
 
           NEW_REVISION=$(aws ecs register-task-definition \
@@ -212,6 +213,12 @@ jobs:
           SERVICE: ${{ secrets.ECS_SERVICE }}
           TEST_MODE: ${{ inputs.test_mode || 'normal' }}
         run: |
+          if [ "$TEST_MODE" = "healthcheck-fail" ]; then
+            # The verification step polls circuit breaker rollback directly.
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if aws ecs wait services-stable \
             --cluster $CLUSTER \
             --services $SERVICE; then
@@ -237,30 +244,45 @@ jobs:
           EXPECTED_TASK_ARN: ${{ steps.deploy.outputs.new_revision }}
           TEST_MODE: ${{ inputs.test_mode || 'normal' }}
         run: |
-          # Circuit breaker rollback can stabilize the service on the previous revision.
-          SERVICE_JSON=$(aws ecs describe-services \
-            --cluster $CLUSTER \
-            --services $SERVICE)
-          CURRENT_TASK_ARN=$(echo "$SERVICE_JSON" | jq -r '.services[0].taskDefinition')
-
           if [ "$TEST_MODE" = "healthcheck-fail" ]; then
-            EXPECTED_IN_PROGRESS=$(echo "$SERVICE_JSON" | jq -r \
-              --arg expected "$EXPECTED_TASK_ARN" \
-              'any(.services[0].deployments[]; .taskDefinition == $expected and .rolloutState == "IN_PROGRESS")')
+            # Circuit breaker rollback can take longer than the AWS waiter default.
+            for attempt in {1..60}; do
+              SERVICE_JSON=$(aws ecs describe-services \
+                --cluster $CLUSTER \
+                --services $SERVICE)
+              CURRENT_TASK_ARN=$(echo "$SERVICE_JSON" | jq -r '.services[0].taskDefinition')
+              EXPECTED_IN_PROGRESS=$(echo "$SERVICE_JSON" | jq -r \
+                --arg expected "$EXPECTED_TASK_ARN" \
+                'any(.services[0].deployments[]?; .taskDefinition == $expected and .rolloutState == "IN_PROGRESS")')
+              EXPECTED_ROLLOUT_STATE=$(echo "$SERVICE_JSON" | jq -r \
+                --arg expected "$EXPECTED_TASK_ARN" \
+                '[.services[0].deployments[]? | select(.taskDefinition == $expected) | .rolloutState][0] // "not-found"')
 
-            if [ "$CURRENT_TASK_ARN" != "$EXPECTED_TASK_ARN" ] && [ "$EXPECTED_IN_PROGRESS" != "true" ]; then
-              echo "Rollback confirmed: ECS stabilized on a previous task definition."
-              exit 0
-            fi
+              if [ "$CURRENT_TASK_ARN" != "$EXPECTED_TASK_ARN" ] && [ "$EXPECTED_IN_PROGRESS" != "true" ]; then
+                echo "Rollback confirmed: ECS stabilized on a previous task definition."
+                exit 0
+              fi
+
+              echo "Rollback not confirmed yet ($attempt/60, failing revision state: $EXPECTED_ROLLOUT_STATE)."
+              if [ "$attempt" -lt 60 ]; then
+                sleep 30
+              fi
+            done
 
             echo "Rollback was not confirmed. ECS is still pointing at the failing revision."
             exit 1
           fi
 
+          SERVICE_JSON=$(aws ecs describe-services \
+            --cluster $CLUSTER \
+            --services $SERVICE)
+          CURRENT_TASK_ARN=$(echo "$SERVICE_JSON" | jq -r '.services[0].taskDefinition')
+
           if [ "$CURRENT_TASK_ARN" != "$EXPECTED_TASK_ARN" ]; then
             echo "ECS service stabilized on a different task definition. Treating deploy as failed."
             exit 1
           fi
+        timeout-minutes: 35
 
       - name: Rollback on failure
         if: failure() && steps.current-task.outputs.arn != '' && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.deploy_ai_worker == 'true'))
