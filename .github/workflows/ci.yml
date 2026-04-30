@@ -200,27 +200,34 @@ jobs:
           aws ecs update-service \
             --cluster $CLUSTER \
             --service $SERVICE \
-            --task-definition $NEW_REVISION
+            --task-definition $NEW_REVISION \
+            --deployment-configuration "deploymentCircuitBreaker={enable=true,rollback=true},maximumPercent=200,minimumHealthyPercent=100" \
+            >/dev/null
 
       - name: Wait for deployment to stabilize
         if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.deploy_ai_worker == 'true')
+        id: wait-deployment
         env:
           CLUSTER: ${{ secrets.ECS_CLUSTER }}
           SERVICE: ${{ secrets.ECS_SERVICE }}
           TEST_MODE: ${{ inputs.test_mode || 'normal' }}
         run: |
-          if ! aws ecs wait services-stable \
+          if aws ecs wait services-stable \
             --cluster $CLUSTER \
             --services $SERVICE; then
-            if [ "$TEST_MODE" = "healthcheck-fail" ]; then
-              # In rollback tests, a failed waiter can be the expected path before verification.
-              echo "Service waiter failed during healthcheck-fail test. Continuing to rollback verification."
-              exit 0
-            fi
-
-            exit 1
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-        timeout-minutes: 10
+
+          echo "stable=false" >> "$GITHUB_OUTPUT"
+          if [ "$TEST_MODE" = "healthcheck-fail" ]; then
+            # Rollback tests may hit the waiter limit before ECS finishes replacing failed tasks.
+            echo "Service waiter did not stabilize during healthcheck-fail test. Continuing to rollback verification."
+            exit 0
+          fi
+
+          exit 1
+        timeout-minutes: 15
 
       - name: Verify ECS is running the new revision
         if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.deploy_ai_worker == 'true')
@@ -231,17 +238,17 @@ jobs:
           TEST_MODE: ${{ inputs.test_mode || 'normal' }}
         run: |
           # Circuit breaker rollback can stabilize the service on the previous revision.
-          CURRENT_TASK_ARN=$(aws ecs describe-services \
+          SERVICE_JSON=$(aws ecs describe-services \
             --cluster $CLUSTER \
-            --services $SERVICE \
-            --query 'services[0].taskDefinition' \
-            --output text)
-
-          echo "Expected task definition: $EXPECTED_TASK_ARN"
-          echo "Current task definition:  $CURRENT_TASK_ARN"
+            --services $SERVICE)
+          CURRENT_TASK_ARN=$(echo "$SERVICE_JSON" | jq -r '.services[0].taskDefinition')
 
           if [ "$TEST_MODE" = "healthcheck-fail" ]; then
-            if [ "$CURRENT_TASK_ARN" != "$EXPECTED_TASK_ARN" ]; then
+            EXPECTED_IN_PROGRESS=$(echo "$SERVICE_JSON" | jq -r \
+              --arg expected "$EXPECTED_TASK_ARN" \
+              'any(.services[0].deployments[]; .taskDefinition == $expected and .rolloutState == "IN_PROGRESS")')
+
+            if [ "$CURRENT_TASK_ARN" != "$EXPECTED_TASK_ARN" ] && [ "$EXPECTED_IN_PROGRESS" != "true" ]; then
               echo "Rollback confirmed: ECS stabilized on a previous task definition."
               exit 0
             fi
@@ -266,4 +273,6 @@ jobs:
           aws ecs update-service \
             --cluster $CLUSTER \
             --service $SERVICE \
-            --task-definition $PREV_TASK_ARN
+            --task-definition $PREV_TASK_ARN \
+            --deployment-configuration "deploymentCircuitBreaker={enable=true,rollback=true},maximumPercent=200,minimumHealthyPercent=100" \
+            >/dev/null
