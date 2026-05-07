@@ -78,6 +78,9 @@ export function MemoryMap({
 
   useEffect(() => {
     let cancelled = false
+    let resizeObserver: ResizeObserver | null = null
+    let animationFrame: number | null = null
+    const sizeTimers: number[] = []
 
     const initMap = async () => {
       if (!containerRef.current || mapRef.current) return
@@ -105,6 +108,9 @@ export function MemoryMap({
           .setView(center, hasLocation ? SELECTED_ZOOM : DEFAULT_ZOOM)
 
         mapRef.current = map
+        const invalidateMapSize = () => {
+          if (!cancelled) map.invalidateSize({ animate: false })
+        }
 
         leaflet
           .tileLayer(TILE_URL, {
@@ -134,9 +140,15 @@ export function MemoryMap({
           })
         }
 
-        requestAnimationFrame(() => {
-          if (!cancelled) map.invalidateSize()
+        animationFrame = requestAnimationFrame(invalidateMapSize)
+        sizeTimers.push(window.setTimeout(invalidateMapSize, 100))
+        sizeTimers.push(window.setTimeout(invalidateMapSize, 300))
+
+        resizeObserver = new ResizeObserver(() => {
+          if (animationFrame !== null) cancelAnimationFrame(animationFrame)
+          animationFrame = requestAnimationFrame(invalidateMapSize)
         })
+        resizeObserver.observe(containerRef.current)
       } catch {
         // 지도 로딩 실패 시 저장/수정 흐름은 막지 않는다.
       } finally {
@@ -148,6 +160,9 @@ export function MemoryMap({
 
     return () => {
       cancelled = true
+      resizeObserver?.disconnect()
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame)
+      sizeTimers.forEach((timer) => window.clearTimeout(timer))
       mapRef.current?.remove()
       mapRef.current = null
       markerRef.current = null
