@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server"
 
+import logger from "@/lib/logger"
+import { validateMemoryMutationInput } from "@/lib/memory-validation"
 import type { UpdateMemoryInput } from "@/lib/services/memory"
 import {
   MEMORY_SELECT_COLUMNS,
@@ -13,12 +15,23 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status })
+  return NextResponse.json(
+    { error: message },
+    { status, headers: { "Cache-Control": "no-store" } },
+  )
 }
 
 function parseMemoryId(rawId: string) {
   const id = Number(rawId)
   return Number.isInteger(id) && id > 0 ? id : null
+}
+
+async function readJsonBody(request: Request) {
+  try {
+    return { ok: true as const, body: await request.json() }
+  } catch {
+    return { ok: false as const, error: "요청 본문이 올바른 JSON이 아닙니다." }
+  }
 }
 
 function buildUpdatePayload(input: UpdateMemoryInput) {
@@ -36,7 +49,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const t0 = Date.now()
-  console.log("[perf][memories/detail] start")
+  logger.info("[perf][memories/detail] start")
 
   try {
     const { id: rawId } = await params
@@ -48,14 +61,13 @@ export async function GET(
 
     const t1 = Date.now()
     const supabase = await getSupabaseServerClient()
-    console.log(`[perf][memories/detail] supabase client: ${Date.now() - t1}ms`)
+    logger.info(`[perf][memories/detail] supabase client: ${Date.now() - t1}ms`)
 
     const t2 = Date.now()
     const {
-      data: { session },
-    } = await supabase.auth.getSession()
-    const user = session?.user ?? null
-    console.log(`[perf][memories/detail] auth.getSession: ${Date.now() - t2}ms`)
+      data: { user },
+    } = await supabase.auth.getUser()
+    logger.info(`[perf][memories/detail] auth.getUser: ${Date.now() - t2}ms`)
 
     if (!user) {
       return jsonError("인증이 필요합니다.", 401)
@@ -68,7 +80,7 @@ export async function GET(
       .eq("id", memoryId)
       .eq("user_id", user.id)
       .single()
-    console.log(`[perf][memories/detail] db query: ${Date.now() - t3}ms`)
+    logger.info(`[perf][memories/detail] db query: ${Date.now() - t3}ms`)
 
     if (error) {
       if (error.code === "PGRST116") {
@@ -79,16 +91,15 @@ export async function GET(
 
     const t4 = Date.now()
     const row = toPublicMemoryRow(data as MemoryDbRow)
-    console.log(`[perf][memories/detail] decrypt: ${Date.now() - t4}ms`)
+    logger.info(`[perf][memories/detail] decrypt: ${Date.now() - t4}ms`)
 
-    console.log(`[perf][memories/detail] total: ${Date.now() - t0}ms`)
+    logger.info(`[perf][memories/detail] total: ${Date.now() - t0}ms`)
     return NextResponse.json(row, {
       headers: { "Cache-Control": "no-store" },
     })
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "메모리를 불러오지 못했습니다."
-    return jsonError(message, 500)
+    logger.error("[memories/detail] GET error:", error)
+    return jsonError("메모리를 불러오지 못했습니다.", 500)
   }
 }
 
@@ -104,20 +115,28 @@ export async function PATCH(
       return jsonError("잘못된 메모리 ID입니다.", 400)
     }
 
-    const input = (await request.json()) as UpdateMemoryInput
     const supabase = await getSupabaseServerClient()
     const {
-      data: { session },
-    } = await supabase.auth.getSession()
-    const user = session?.user ?? null
+      data: { user },
+    } = await supabase.auth.getUser()
 
     if (!user) {
       return jsonError("인증이 필요합니다.", 401)
     }
 
+    const body = await readJsonBody(request)
+    if (!body.ok) {
+      return jsonError(body.error, 400)
+    }
+
+    const validation = validateMemoryMutationInput(body.body)
+    if (!validation.ok) {
+      return jsonError(validation.error, 400)
+    }
+
     const { error } = await supabase
       .from("memories")
-      .update(buildUpdatePayload(input) as unknown as never)
+      .update(buildUpdatePayload(validation.value) as unknown as never)
       .eq("id", memoryId)
       .eq("user_id", user.id)
 
@@ -125,8 +144,7 @@ export async function PATCH(
 
     return new Response(null, { status: 204 })
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "메모리 수정에 실패했습니다."
-    return jsonError(message, 500)
+    logger.error("[memories/detail] PATCH error:", error)
+    return jsonError("메모리 수정에 실패했습니다.", 500)
   }
 }

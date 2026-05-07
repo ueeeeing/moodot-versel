@@ -7,6 +7,8 @@ import { getSupabaseBrowserClient } from "@/lib/supabase/client"
 import { compressImage } from "@/lib/image-compression"
 import { uploadImage, getSignedUrl } from "@/lib/storage/image"
 import { getMemoryById, updateMemory, deleteMemory } from "@/lib/services/memory"
+import logger from "@/lib/logger"
+import { validateMemoryMutationInput } from "@/lib/memory-validation"
 import { BottomNavigation } from "@/components/moodot/bottom-navigation"
 import {
   EMOTION_ID_MAP,
@@ -24,6 +26,11 @@ function toDatetimeLocal(iso: string | null): string {
   if (isNaN(d.getTime())) return ""
   const pad = (n: number) => String(n).padStart(2, "0")
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function toMemoryAtIso(memoryAt: string): string | null {
+  const date = memoryAt ? new Date(memoryAt) : new Date()
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -71,7 +78,8 @@ export default function EditMemoryPage() {
         setLocationLat(data.location_lat ?? null)
         setLocationLng(data.location_lng ?? null)
         setPlaceName(data.place_name ?? "")
-      } catch {
+      } catch (e) {
+        logger.error("[memory/edit] load error:", e)
         alert("기존 기록을 불러오지 못했습니다.")
         router.back()
       } finally {
@@ -92,6 +100,7 @@ export default function EditMemoryPage() {
       setImageUrl(path)
       setUploadStatus("success")
     } catch (e) {
+      logger.error("[memory/edit] photo upload error:", e)
       setUploadStatus("failed")
       alert(`사진 업로드 실패: ${e instanceof Error ? e.message : ""}`)
     }
@@ -110,7 +119,7 @@ export default function EditMemoryPage() {
     setLocationLabel(label)
   }
 
-  // 위치 초기화 — 마커 제거 + 상태 초기화
+  // 위치 초기화 — 상태 초기화
   const handleClearLocation = () => {
     setLocationLat(null)
     setLocationLng(null)
@@ -123,6 +132,7 @@ export default function EditMemoryPage() {
       await deleteMemory(memoryId)
       router.replace("/records")
     } catch (e) {
+      logger.error("[memory/edit] delete error:", e)
       alert(`삭제 실패: ${e instanceof Error ? e.message : ""}`)
     }
   }
@@ -131,22 +141,36 @@ export default function EditMemoryPage() {
   const handleSave = async () => {
     if (uploadStatus === "uploading") { alert("사진 업로드가 완료된 후 저장해 주세요."); return }
 
+    const memoryAtIso = toMemoryAtIso(memoryAt)
+    if (!memoryAtIso) {
+      alert("날짜 형식이 올바르지 않습니다.")
+      return
+    }
+
+    const input = {
+      title:          title.trim() || null,
+      text:           text.trim() || null,
+      image_url:      imageUrl,
+      emotion_id:     EMOTION_ID_MAP[mood],
+      with_whom:      withWho === "solo" ? "Solo" : "Together",
+      memory_at:      memoryAtIso,
+      location_lat:   locationLat,
+      location_lng:   locationLng,
+      location_label: locationLabel.trim() || null,
+      place_name:     placeName.trim() || null,
+    }
+    const validation = validateMemoryMutationInput(input)
+    if (!validation.ok) {
+      alert(validation.error)
+      return
+    }
+
     setIsSaving(true)
     try {
-      await updateMemory(memoryId, {
-        title:          title.trim() || null,
-        text:           text.trim() || null,
-        image_url:      imageUrl,
-        emotion_id:     EMOTION_ID_MAP[mood],
-        with_whom:      withWho === "solo" ? "Solo" : "Together",
-        memory_at:      memoryAt ? new Date(memoryAt).toISOString() : new Date().toISOString(),
-        location_lat:   locationLat,
-        location_lng:   locationLng,
-        location_label: locationLabel.trim() || null,
-        place_name:     placeName.trim() || null,
-      })
+      await updateMemory(memoryId, validation.value)
       router.push(`/memory/${memoryId}`)
     } catch (e) {
+      logger.error("[memory/edit] save error:", e)
       alert(`저장 실패: ${e instanceof Error ? e.message : ""}`)
     } finally {
       setIsSaving(false)
@@ -181,7 +205,7 @@ export default function EditMemoryPage() {
         </div>
       </header>
 
-      <main className="mx-auto flex max-w-[375px] flex-col gap-6 px-5 pb-32 pt-24">
+      <main className="mx-auto flex max-w-[375px] flex-col gap-3 px-5 pb-32 pt-24">
         <MemoryForm
           mode="edit"
           mood={mood}

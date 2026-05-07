@@ -4,10 +4,10 @@ import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Smile, Frown, CloudRain, Leaf, User, Users, MapPin, Pencil } from "lucide-react"
 import { getMemoryById, type MemoryRow } from "@/lib/services/memory"
+import logger from "@/lib/logger"
 import { SignedImage } from "@/components/moodot/signed-image"
 import { MemoryExportDrawer } from "@/components/moodot/memory-export-drawer"
 import { MemoryMap } from "@/components/moodot/memory-map"
-
 
 const EMOTION_MAP: Record<number, { icon: React.ElementType; color: string }> = {
   1: { icon: Smile,     color: "#FFE8B8" },
@@ -43,6 +43,7 @@ export function MemoryDetail({ id }: { id: number }) {
         setMemory(data)
       } catch (e) {
         if (!mounted) return
+        logger.error("[memory-detail] load error:", e)
         setError(e instanceof Error ? e.message : "불러오지 못했습니다.")
       } finally {
         if (mounted) setIsLoading(false)

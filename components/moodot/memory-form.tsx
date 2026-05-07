@@ -147,10 +147,8 @@ export function MemoryForm({
     <>
       {mode === "create" && (
         <section>
-          <h2 className="font-heading text-[36px] font-bold leading-[1.15] tracking-[-0.02em] text-mb-dark">
-            오늘을 어떻게
-            <br />
-            기억하고 싶나요?
+          <h2 className="font-heading text-[22px] font-bold leading-[1.2] tracking-[-0.02em] text-mb-dark">
+            오늘을 어떻게 기억하고 싶나요?
           </h2>
         </section>
       )}
@@ -194,7 +192,7 @@ export function MemoryForm({
               key={value}
               type="button"
               onClick={() => onWithWhoChange(value)}
-              className="h-11 flex-1 rounded-full text-[14px] font-semibold transition-all duration-200"
+              className="h-[29px] flex-1 rounded-full text-[14px] font-semibold transition-all duration-200"
               style={{
                 background: withWho === value ? "#7CC4D8" : "transparent",
                 color: withWho === value ? "#FFFFFF" : "#AAB3B6",
@@ -306,7 +304,7 @@ export function MemoryForm({
           )}
         </div>
 
-        <div className="relative h-48 overflow-hidden rounded-xl border border-[#AAB3B61A] bg-[#EFF4F6]">
+        <div className="relative isolate h-48 overflow-hidden rounded-xl border border-[#AAB3B61A] bg-[#EFF4F6]">
           <MemoryMap lat={locationLat} lng={locationLng} onLocationSelect={onLocationSelect} />
         </div>
         <p className="text-[11px] text-mb-muted">지도를 탭하면 위치가 바로 변경됩니다.</p>

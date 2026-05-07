@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { useRouter } from "next/navigation"
 import { getRecentMemories, invalidateRecentMemoriesCache, type MemoryRow } from "@/lib/services/memory"
 import { getSupabaseBrowserClient } from "@/lib/supabase/client"
+import logger from "@/lib/logger"
 
 const EMOTION_COLOR_MAP: Record<number, string> = {
   1: "#FFE8B8",
@@ -81,20 +82,20 @@ export function RecentReflections() {
       const mySeq = ++fetchSeq
       try {
         const data = await getRecentMemories(2)
-        // mySeq !== fetchSeq: auth 변경으로 이 fetch가 무효화됨 → setState 생략
         if (!mounted || mySeq !== fetchSeq) return
         setMemories(data)
-      } catch {
+      } catch (e) {
+        logger.error("[recent-reflections] load error:", e)
         fetched = false
+        // 기존 동작 유지: 에러 시 빈 목록으로 처리
       } finally {
         if (mounted) setIsLoading(false)
       }
     }
 
-    // 이미 세션이 있으면 즉시 fetch (getSession은 로컬 캐시 읽기, 네트워크 없음).
-    // 세션이 없으면 즉시 로딩 해제 — INITIAL_SESSION(null)에서 SIGNED_IN이 오지 않을 때
-    // isLoading이 영구적으로 true로 남는 것을 방지한다.
+    // 이미 세션이 있으면 즉시 fetch. 세션이 없으면 로딩 고착을 피한다.
     supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!mounted) return
       if (session?.user) {
         void doFetch()
       } else {
@@ -105,7 +106,6 @@ export function RecentReflections() {
     // 세션 없을 때 AuthInit의 signInAnonymously 완료를 감지해 fetch
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_OUT") {
-        // 로그아웃: 캐시 clear + fetchSeq 증가(진행 중 fetch 무효화) + UI 즉시 초기화
         invalidateRecentMemoriesCache()
         fetchSeq++
         fetched = false
@@ -113,12 +113,13 @@ export function RecentReflections() {
         setIsLoading(false)
         return
       }
+
       if (event === "SIGNED_IN") {
-        // 로그인: stale 캐시 clear + fetchSeq 증가(로그인 전 fetch 무효화) + fetched 초기화 후 fetch
         invalidateRecentMemoriesCache()
         fetchSeq++
         fetched = false
       }
+
       if (session?.user) void doFetch()
     })
 
@@ -149,7 +150,7 @@ export function RecentReflections() {
         <p className="py-4 text-center text-sm text-mb-muted">기록이 없습니다.</p>
       ) : (
         <div className="flex flex-col gap-3">
-          {memories.map((memory, index) => {
+          {memories.map((memory) => {
             const color = EMOTION_COLOR_MAP[memory.emotion_id ?? 1] ?? EMOTION_COLOR_MAP[1]
             const label = formatMemoryDate(memory.memory_at)
             const text = memory.text?.trim() || memory.title?.trim() || "내용 없음"

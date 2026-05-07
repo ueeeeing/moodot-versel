@@ -7,6 +7,8 @@ import { getSupabaseBrowserClient } from "@/lib/supabase/client"
 import { compressImage } from "@/lib/image-compression"
 import { uploadImage } from "@/lib/storage/image"
 import { createMemory } from "@/lib/services/memory"
+import logger from "@/lib/logger"
+import { validateMemoryMutationInput } from "@/lib/memory-validation"
 import { BottomNavigation } from "@/components/moodot/bottom-navigation"
 import { EMOTION_ID_MAP, MemoryForm, type MoodType, type UploadStatus, type WithType } from "@/components/moodot/memory-form"
 import { reverseGeocode } from "@/lib/location/reverse-geocode"
@@ -28,6 +30,11 @@ function getBrowserCurrentPosition(): Promise<{ lat: number; lng: number } | nul
       { enableHighAccuracy: true, timeout: 7000, maximumAge: 60_000 },
     )
   })
+}
+
+function toMemoryAtIso(memoryAt: string): string | null {
+  const date = memoryAt ? new Date(memoryAt) : new Date()
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
 }
 
 export default function CreatePage() {
@@ -90,6 +97,7 @@ export default function CreatePage() {
       setImageUrl(path)
       setUploadStatus("success")
     } catch (error) {
+      logger.error("[memory-create] photo upload error:", error)
       setUploadStatus("failed")
       const message = error instanceof Error ? error.message : "사진 업로드에 실패했습니다."
       alert(`사진 업로드 실패: ${message}`)
@@ -130,22 +138,36 @@ export default function CreatePage() {
       return
     }
 
+    const memoryAtIso = toMemoryAtIso(memoryAt)
+    if (!memoryAtIso) {
+      alert("날짜 형식이 올바르지 않습니다.")
+      return
+    }
+
+    const input = {
+      title:          title.trim() === "" ? null : title.trim(),
+      text:           text.trim() === "" ? null : text.trim(),
+      image_url:      imageUrl,
+      emotion_id:     EMOTION_ID_MAP[mood],
+      with_whom:      withWho === "solo" ? "Solo" : "Together",
+      location_lat:   locationLat,
+      location_lng:   locationLng,
+      location_label: locationLabel.trim() === "" ? null : locationLabel.trim(),
+      place_name:     placeName.trim() === "" ? null : placeName.trim(),
+      memory_at:      memoryAtIso,
+    }
+    const validation = validateMemoryMutationInput(input)
+    if (!validation.ok) {
+      alert(validation.error)
+      return
+    }
+
     setIsSaving(true)
     try {
-      const newId = await createMemory({
-        title:          title.trim() === "" ? null : title.trim(),
-        text:           text.trim() === "" ? null : text.trim(),
-        image_url:      imageUrl,
-        emotion_id:     EMOTION_ID_MAP[mood],
-        with_whom:      withWho === "solo" ? "Solo" : "Together",
-        location_lat:   locationLat,
-        location_lng:   locationLng,
-        location_label: locationLabel.trim() === "" ? null : locationLabel.trim(),
-        place_name:     placeName.trim() === "" ? null : placeName.trim(),
-        memory_at:      memoryAt ? new Date(memoryAt).toISOString() : new Date().toISOString(),
-      })
+      const newId = await createMemory(validation.value)
       router.replace(`/memory/${newId}`)
     } catch (error) {
+      logger.error("[memory-create] save error:", error)
       const message = error instanceof Error ? error.message : "저장 중 오류가 발생했습니다."
       alert(`저장 실패: ${message}`)
     } finally {
@@ -170,7 +192,7 @@ export default function CreatePage() {
         </div>
       </header>
 
-      <main className="mx-auto flex max-w-[375px] flex-col gap-6 px-5 pb-32 pt-24">
+      <main className="mx-auto flex max-w-[375px] flex-col gap-3 px-5 pb-32 pt-20">
         <MemoryForm
           mode="create"
           mood={mood}
