@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { useRouter } from "next/navigation"
-import { getRecentMemories, type MemoryRow } from "@/lib/services/memory"
+import { getRecentMemories, invalidateRecentMemoriesCache, type MemoryRow } from "@/lib/services/memory"
 import { getSupabaseBrowserClient } from "@/lib/supabase/client"
 
 const EMOTION_COLOR_MAP: Record<number, string> = {
@@ -72,30 +72,53 @@ export function RecentReflections() {
   useEffect(() => {
     let mounted = true
     let fetched = false
+    let fetchSeq = 0
     const supabase = getSupabaseBrowserClient()
 
     const doFetch = async () => {
       if (fetched || !mounted) return
       fetched = true
+      const mySeq = ++fetchSeq
       try {
         const data = await getRecentMemories(2)
-        if (!mounted) return
+        // mySeq !== fetchSeq: auth 변경으로 이 fetch가 무효화됨 → setState 생략
+        if (!mounted || mySeq !== fetchSeq) return
         setMemories(data)
       } catch {
-        // 실패 시 fetched를 리셋해 onAuthStateChange 재시도를 허용
         fetched = false
       } finally {
         if (mounted) setIsLoading(false)
       }
     }
 
-    // 이미 세션이 있으면 즉시 fetch (getSession은 로컬 캐시 읽기, 네트워크 없음)
+    // 이미 세션이 있으면 즉시 fetch (getSession은 로컬 캐시 읽기, 네트워크 없음).
+    // 세션이 없으면 즉시 로딩 해제 — INITIAL_SESSION(null)에서 SIGNED_IN이 오지 않을 때
+    // isLoading이 영구적으로 true로 남는 것을 방지한다.
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) void doFetch()
+      if (session?.user) {
+        void doFetch()
+      } else {
+        setIsLoading(false)
+      }
     })
 
     // 세션 없을 때 AuthInit의 signInAnonymously 완료를 감지해 fetch
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_OUT") {
+        // 로그아웃: 캐시 clear + fetchSeq 증가(진행 중 fetch 무효화) + UI 즉시 초기화
+        invalidateRecentMemoriesCache()
+        fetchSeq++
+        fetched = false
+        setMemories([])
+        setIsLoading(false)
+        return
+      }
+      if (event === "SIGNED_IN") {
+        // 로그인: stale 캐시 clear + fetchSeq 증가(로그인 전 fetch 무효화) + fetched 초기화 후 fetch
+        invalidateRecentMemoriesCache()
+        fetchSeq++
+        fetched = false
+      }
       if (session?.user) void doFetch()
     })
 

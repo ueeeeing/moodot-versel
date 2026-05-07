@@ -93,20 +93,71 @@ export async function getMemories(limit?: number, offset?: number): Promise<Memo
   return requestJson<MemoryRow[]>("/api/memories")
 }
 
+const RECENT_MEMORIES_TTL_MS = 30_000
+
+type RecentCacheEntry = { data: MemoryRow[]; ts: number }
+const _recentMemoriesCache = new Map<string, RecentCacheEntry>()
+let _recentMemoriesCacheGen = 0
+
 const _recentMemoriesInflight = new Map<string, Promise<MemoryRow[]>>()
 
-/** 최신 N개 (memory_at 내림차순). 동일 limit의 동시 호출은 하나의 요청으로 합산. 에러 시 throw. */
-export function getRecentMemories(limit: number): Promise<MemoryRow[]> {
-  const params = new URLSearchParams({ limit: String(limit) })
-  const url = `/api/memories?${params.toString()}`
+/**
+ * recent memories 캐시를 무효화한다.
+ *
+ * generation을 증가시켜 두 가지를 동시에 보장한다.
+ * 1. 이미 진행 중인 fetch가 완료되어도 캐시에 저장되지 않는다 (gen 불일치).
+ * 2. getRecentMemories의 in-flight 키가 generation을 포함하므로, 이 시점 이후의
+ *    호출자는 구 gen의 in-flight를 공유하지 않고 새 fetch를 시작한다.
+ *    → auth 전환 전 시작된 fetch 결과가 새 auth 사용자의 UI에 반영되지 않는다.
+ *
+ * limit 미지정(전체 무효화) 시 in-flight Map도 함께 비운다.
+ * gen-scoped 키 덕분에 이후 같은 gen의 동시 호출은 여전히 dedup된다.
+ */
+export function invalidateRecentMemoriesCache(limit?: number): void {
+  _recentMemoriesCacheGen++
+  if (limit !== undefined) {
+    _recentMemoriesCache.delete(`recent:${limit}`)
+  } else {
+    _recentMemoriesCache.clear()
+    _recentMemoriesInflight.clear()
+  }
+}
 
-  const inflight = _recentMemoriesInflight.get(url)
+/**
+ * 최신 N개 (memory_at 내림차순).
+ * in-flight 키에 현재 auth generation을 포함해 auth 전환 전후 요청을 격리한다.
+ * 동일 gen의 동시 호출은 하나의 요청으로 합산된다.
+ * 에러 시 throw.
+ */
+export function getRecentMemories(limit: number): Promise<MemoryRow[]> {
+  const cacheKey = `recent:${limit}`
+  const cached = _recentMemoriesCache.get(cacheKey)
+  if (cached && Date.now() - cached.ts < RECENT_MEMORIES_TTL_MS) {
+    return Promise.resolve(cached.data)
+  }
+
+  const url = `/api/memories?${new URLSearchParams({ limit: String(limit) })}`
+  // in-flight 키에 gen을 포함한다.
+  // gen이 바뀐 이후의 호출자는 다른 키를 보게 되어 구 세션의 Promise를 공유하지 않는다.
+  // 401/4xx/5xx는 requestJson이 throw하므로 .then()이 실행되지 않아 캐시에 저장되지 않는다.
+  const gen = _recentMemoriesCacheGen
+  const inflightKey = `${gen}:${url}`
+
+  const inflight = _recentMemoriesInflight.get(inflightKey)
   if (inflight) return inflight
 
-  const promise = requestJson<MemoryRow[]>(url).finally(() => {
-    _recentMemoriesInflight.delete(url)
-  })
-  _recentMemoriesInflight.set(url, promise)
+  const promise = requestJson<MemoryRow[]>(url)
+    .then((data) => {
+      if (_recentMemoriesCacheGen === gen) {
+        _recentMemoriesCache.set(cacheKey, { data, ts: Date.now() })
+      }
+      return data
+    })
+    .finally(() => {
+      _recentMemoriesInflight.delete(inflightKey)
+    })
+
+  _recentMemoriesInflight.set(inflightKey, promise)
   return promise
 }
 
@@ -144,6 +195,7 @@ export async function createMemory(input: CreateMemoryInput): Promise<number> {
     body: JSON.stringify(input),
   })
 
+  invalidateRecentMemoriesCache()
   return data.id
 }
 
@@ -153,6 +205,7 @@ export async function updateMemory(id: number, input: UpdateMemoryInput): Promis
     method: "PATCH",
     body: JSON.stringify(input),
   })
+  invalidateRecentMemoriesCache()
 }
 
 /** 메모리 삭제. 에러 시 throw. */
@@ -160,4 +213,5 @@ export async function deleteMemory(id: number): Promise<void> {
   const supabase = getSupabaseBrowserClient()
   const { error } = await supabase.from("memories").delete().eq("id", id)
   if (error) throw error
+  invalidateRecentMemoriesCache()
 }
